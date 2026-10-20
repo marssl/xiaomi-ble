@@ -919,6 +919,10 @@ def obj100a(
 ) -> dict[str, Any]:
     """Battery"""
     batt = xobj[0]
+    if device_type == "ZNMS20LM":
+        # The D100 battery object is a percentage, not a pack-voltage reading.
+        device.update_predefined_sensor(SensorLibrary.BATTERY__PERCENTAGE, batt)
+        return {}
     if device_type in ["LYWSDCGQ", "CGDK3"]:
         # Those devices have a single AAA 1.5V battery
         volt = 0.8 + (1.6 - 0.8) * (batt / 100)

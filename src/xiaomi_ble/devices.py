@@ -309,6 +309,11 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
         name="Door Lock",
         model="ZNMS17LM",
     ),
+    0x0BEB: DeviceEntry(
+        name="Door Lock D100",
+        model="ZNMS20LM",
+        manufacturer="Aqara",
+    ),
     0x0380: DeviceEntry(
         name="Door Lock",
         model="DSL-C08",

@@ -39,6 +39,7 @@ from .const import (
     ExtendedBinarySensorDeviceClass,
     ExtendedSensorDeviceClass,
 )
+from .d100 import D100State
 from .devices import (
     DEVICE_TYPES,
     SCALE_MODELS_WITH_STABILIZED,
@@ -182,6 +183,9 @@ def obj0007(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
     """Door"""
+    if device_type == "ZNMS20LM":
+        device.d100.door(xobj, device)
+        return {}
     door_byte = xobj[0]
     if door_byte == 0x00:
         # open the door
@@ -339,6 +343,8 @@ def obj000b(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
     """Lock"""
+    if device_type == "ZNMS20LM" and not device.d100.accept(0x000B, xobj):
+        return {}
     if len(xobj) == 9:
         lock_action_int = xobj[0] & 0x0F
         lock_method_int = xobj[0] >> 4
@@ -356,48 +362,60 @@ def obj000b(
 
         # Some specific key_ids represent an error
         error = BLE_LOCK_ERROR.get(key_id)
+        if error:
+            # An alarm is not a successful operation and has no operator key.
+            device.fire_event(
+                key=EventDeviceKeys.ERROR,
+                event_type=error,
+                event_properties=None,
+            )
+            return {}
 
-        if not error:
-            if key_id == 0x00000000:
-                key_type = "administrator"
-            elif key_id == 0xFFFFFFFF:
-                key_type = "unknown operator"
-            elif key_id == 0xDEADBEEF:
-                key_type = "invalid operator"
-            elif key_id <= 0x7FFFFFFF:
-                # Bluetooth (up to 2147483647)
-                key_type = f"Bluetooth key {key_id}"
+        if key_id == 0x00000000:
+            key_type = "administrator"
+        elif key_id == 0xFFFFFFFF:
+            key_type = "unknown operator"
+        elif key_id == 0xDEADBEEF:
+            key_type = "invalid operator"
+        elif key_id <= 0x7FFFFFFF:
+            # Bluetooth (up to 2147483647)
+            key_type = f"Bluetooth key {key_id}"
+        else:
+            # All other key methods have only key ids up to 65536
+
+            if key_id <= 0x8001FFFF:
+                key_type = f"Fingerprint key id {short_key_id}"
+            elif key_id <= 0x8002FFFF:
+                key_type = f"Password key id {short_key_id}"
+            elif key_id <= 0x8003FFFF:
+                key_type = f"Keys key id {short_key_id}"
+            elif key_id <= 0x8004FFFF:
+                key_type = f"NFC key id {short_key_id}"
+            elif key_id <= 0x8005FFFF:
+                key_type = f"Two-step verification key id {short_key_id}"
+            elif key_id <= 0x8006FFFF:
+                key_type = f"Human face key id {short_key_id}"
+            elif key_id <= 0x8007FFFF:
+                key_type = f"Finger veins key id {short_key_id}"
+            elif key_id <= 0x8008FFFF:
+                key_type = f"Palm print key id {short_key_id}"
             else:
-                # All other key methods have only key ids up to 65536
-
-                if key_id <= 0x8001FFFF:
-                    key_type = f"Fingerprint key id {short_key_id}"
-                elif key_id <= 0x8002FFFF:
-                    key_type = f"Password key id {short_key_id}"
-                elif key_id <= 0x8003FFFF:
-                    key_type = f"Keys key id {short_key_id}"
-                elif key_id <= 0x8004FFFF:
-                    key_type = f"NFC key id {short_key_id}"
-                elif key_id <= 0x8005FFFF:
-                    key_type = f"Two-step verification key id {short_key_id}"
-                elif key_id <= 0x8006FFFF:
-                    key_type = f"Human face key id {short_key_id}"
-                elif key_id <= 0x8007FFFF:
-                    key_type = f"Finger veins key id {short_key_id}"
-                elif key_id <= 0x8008FFFF:
-                    key_type = f"Palm print key id {short_key_id}"
-                else:
-                    key_type = f"key id {short_key_id}"
+                key_type = f"key id {short_key_id}"
 
         # Lock type and state
-        # Lock type can be `lock` or for ZNMS17LM `lock`, `childlock` or `antilock`
-        if device_type == "ZNMS17LM":
+        # D100 and ZNMS17LM distinguish main, child and anti-lock states.
+        if device_type in {"ZNMS17LM", "ZNMS20LM"}:
             # Lock type can be `lock`, `childlock` or `antilock`
             lock_type = BLE_LOCK_ACTION[lock_action_int][1]
         else:
             # Lock type can only be `lock` for other locks
             lock_type = "lock"
         lock_state = BLE_LOCK_ACTION[lock_action_int][0]
+
+        if device_type == "ZNMS20LM":
+            if lock_action_int == 15:
+                return {}  # Abnormal action does not establish a lock state.
+            device.d100.lock(xobj, device)
 
         # Update lock state
         if lock_type == "lock":
@@ -443,13 +461,6 @@ def obj000b(
             native_value=lock_method.value,
             native_unit_of_measurement=None,
         )
-        if error:
-            # Fire event with the error: see BLE_LOCK_ERROR
-            device.fire_event(
-                key=EventDeviceKeys.ERROR,
-                event_type=error,
-                event_properties=None,
-            )
     return {}
 
 
@@ -2081,6 +2092,7 @@ class XiaomiBluetoothDeviceData(BluetoothData):
     def __init__(self, bindkey: bytes | None = None) -> None:
         super().__init__()
         self.set_bindkey(bindkey)
+        self.d100 = D100State()
 
         # Data that we know how to parse but don't yet map to the SensorData model.
         self.unhandled: dict[str, Any] = {}
@@ -2127,9 +2139,12 @@ class XiaomiBluetoothDeviceData(BluetoothData):
         self.bindkey = bindkey
 
     def supported(self, data: BluetoothServiceInfo) -> bool:
-        if not super().supported(data):
-            return False
-        return True
+        # Discovery authenticates packets but must not consume D100 events.
+        self.d100.discovery = True
+        try:
+            return super().supported(data)
+        finally:
+            self.d100.discovery = False
 
     def _start_update(self, service_info: BluetoothServiceInfo) -> None:
         """Update from BLE advertisement data."""
@@ -2350,6 +2365,10 @@ class XiaomiBluetoothDeviceData(BluetoothData):
 
         self.set_device_sw_version(firmware)
 
+        # Use authentication of THIS packet, never the sticky bindkey flag.
+        self.d100.authenticated = bool(
+            frctrl_is_encrypted and frctrl_version >= 4 and payload is not None
+        )
         if payload is not None:
             sinfo += ", Object data: " + payload.hex()
             # loop through parse_xiaomi payload
